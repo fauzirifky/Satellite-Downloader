@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+cache_runs/
+satellite_cache_runs/
+satellite_jobs/
+boundary_inputs/
+
+~$*.xlsx
