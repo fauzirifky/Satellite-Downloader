@@ -45,7 +45,6 @@ except ImportError:
 APP_DIR = Path(__file__).resolve().parent
 CACHE_ROOT = APP_DIR / "satellite_cache_runs"
 BOUNDARY_INPUT_ROOT = APP_DIR / "boundary_inputs"
-WORKSPACE_ROOT = APP_DIR.parent
 BANDUNG_KELURAHAN_GEOJSON = APP_DIR / "sample_boundaries" / "bandung_kelurahan.geojson"
 JOB_ROOT = APP_DIR / "satellite_jobs"
 MIN_OBSERVATION_DATE = date(2000, 1, 1)
@@ -209,8 +208,8 @@ def launch_background_job(job_dir: Path) -> None:
     log_path = job_dir / "job.log"
     with log_path.open("ab") as handle:
         subprocess.Popen(
-            [sys.executable, "-m", "satellite_dengue_excel.satellite_job_runner", "--job-dir", str(job_dir)],
-            cwd=str(WORKSPACE_ROOT),
+            [sys.executable, str(APP_DIR / "satellite_job_runner.py"), "--job-dir", str(job_dir)],
+            cwd=str(APP_DIR),
             stdout=handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
