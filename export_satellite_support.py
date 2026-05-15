@@ -406,6 +406,25 @@ def geojson_feature_list(geojson_object: Dict[str, Any]) -> List[Dict[str, Any]]
     return features
 
 
+def normalize_geojson_coordinates(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        if value and all(isinstance(item, (int, float)) for item in value):
+            if len(value) < 2:
+                raise ValueError(f"Koordinat GeoJSON tidak valid: {value!r}")
+            return [value[0], value[1]]
+        return [normalize_geojson_coordinates(item) for item in value]
+    return value
+
+
+def normalize_geojson_geometry(geometry: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(geometry, dict) or "type" not in geometry:
+        raise ValueError("Geometry GeoJSON tidak valid.")
+    normalized = dict(geometry)
+    if "coordinates" in normalized:
+        normalized["coordinates"] = normalize_geojson_coordinates(normalized["coordinates"])
+    return normalized
+
+
 def normalize_custom_property_value(value: Any) -> str:
     if value is None:
         return ""
@@ -481,6 +500,7 @@ def build_custom_regions_from_geojson(
         geometry = feature_dict.get("geometry")
         if not geometry:
             raise ValueError("Salah satu fitur GeoJSON tidak memiliki geometry.")
+        geometry = normalize_geojson_geometry(geometry)
         name_value = normalize_custom_property_value(properties.get(region_name_field))
         if not name_value:
             raise ValueError(f"Field nama wilayah '{region_name_field}' tidak ditemukan pada salah satu fitur.")
