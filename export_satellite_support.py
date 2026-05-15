@@ -53,6 +53,8 @@ DEFAULT_PERIOD_BATCH_SIZE_BY_GROUP = {
     "wave": 8,
     "pollution": 26,
 }
+FEATURE_COLLECTION_RESULT_LIMIT = 5_000
+FEATURE_COLLECTION_RESULT_SAFETY_LIMIT = 4_500
 TILE_SCALE_BY_GROUP = {
     "climate": 4,
     "rainfall": 4,
@@ -1318,8 +1320,21 @@ def is_timeout_error(exc: Exception) -> bool:
     return "Computation timed out" in detail or "deadline exceeded" in detail.lower()
 
 
+def is_collection_accumulation_limit_error(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return "accumulating over 5000 elements" in detail or "collection query aborted after accumulating over" in detail
+
+
 def is_retryable_chunk_error(exc: Exception) -> bool:
-    return is_response_size_error(exc) or is_timeout_error(exc)
+    return is_response_size_error(exc) or is_timeout_error(exc) or is_collection_accumulation_limit_error(exc)
+
+
+def adaptive_period_batch_size(group_name: str, region_count: int) -> int:
+    default_batch_size = DEFAULT_PERIOD_BATCH_SIZE_BY_GROUP.get(group_name, DEFAULT_PERIOD_BATCH_SIZE)
+    if region_count <= 0:
+        return default_batch_size
+    feature_limited_batch_size = max(1, FEATURE_COLLECTION_RESULT_SAFETY_LIMIT // region_count)
+    return max(1, min(default_batch_size, feature_limited_batch_size))
 
 
 def fetch_group_chunk_frame(
@@ -1417,8 +1432,15 @@ def reduce_group_over_periods(
         return pd.DataFrame(columns=columns)
 
     print(f"Mengambil grup {group_name}: {len(valid_periods)} periode sumber", flush=True)
-    batch_size = DEFAULT_PERIOD_BATCH_SIZE_BY_GROUP.get(group_name, DEFAULT_PERIOD_BATCH_SIZE)
+    region_count = int(regions_fc.size().getInfo())
+    batch_size = adaptive_period_batch_size(group_name, region_count)
     total_batches = math.ceil(len(valid_periods) / batch_size)
+    if batch_size != DEFAULT_PERIOD_BATCH_SIZE_BY_GROUP.get(group_name, DEFAULT_PERIOD_BATCH_SIZE):
+        print(
+            f"  Menyesuaikan batch grup {group_name} menjadi {batch_size} periode sumber "
+            f"karena ada {region_count} wilayah dan limit hasil Earth Engine sekitar {FEATURE_COLLECTION_RESULT_LIMIT}.",
+            flush=True,
+        )
     chunk_frames: List[pd.DataFrame] = []
     for batch_index, period_chunk in enumerate(period_batches(valid_periods, batch_size), start=1):
         chunk_start = period_chunk[0].start.isoformat()
