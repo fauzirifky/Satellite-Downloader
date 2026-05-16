@@ -113,6 +113,7 @@ class SatelliteAreaConfig:
     custom_filter_field: Optional[str] = None
     custom_filter_value: Optional[str] = None
     frequency: str = "monthly"
+    aggregation_strategy: str = "auto"
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     wave_buffer_km: float = 50.0
@@ -140,6 +141,7 @@ def area_config_to_payload(area: SatelliteAreaConfig) -> Dict[str, Any]:
         "custom_filter_field": area.custom_filter_field,
         "custom_filter_value": area.custom_filter_value,
         "frequency": area.frequency,
+        "aggregation_strategy": area.aggregation_strategy,
         "start_date": area.start_date.isoformat() if area.start_date else None,
         "end_date": area.end_date.isoformat() if area.end_date else None,
         "wave_buffer_km": area.wave_buffer_km,
@@ -163,6 +165,7 @@ def area_config_from_payload(payload: Dict[str, Any]) -> SatelliteAreaConfig:
         custom_filter_field=payload.get("custom_filter_field"),
         custom_filter_value=payload.get("custom_filter_value"),
         frequency=payload.get("frequency", "monthly"),
+        aggregation_strategy=payload.get("aggregation_strategy", "auto"),
         start_date=date.fromisoformat(start_date) if start_date else None,
         end_date=date.fromisoformat(end_date) if end_date else None,
         wave_buffer_km=float(payload.get("wave_buffer_km", 50.0)),
@@ -300,6 +303,9 @@ def build_group_frame(config: SatelliteWorkbookConfig, group_name: str) -> pd.Da
     )
     namespace = SimpleNamespace(
         frequency=config.area.frequency,
+        aggregation_strategy=config.area.aggregation_strategy,
+        boundary_mode=config.area.boundary_mode,
+        admin_level=config.area.admin_level,
         wave_buffer_km=config.area.wave_buffer_km,
     )
     frame = collect_support_dataframe(
@@ -380,6 +386,7 @@ def metadata_frame(config: SatelliteWorkbookConfig) -> pd.DataFrame:
         {"key": "custom_filter_field", "value": config.area.custom_filter_field or ""},
         {"key": "custom_filter_value", "value": config.area.custom_filter_value or ""},
         {"key": "frequency", "value": config.area.frequency},
+        {"key": "aggregation_strategy", "value": config.area.aggregation_strategy},
         {"key": "start_date", "value": config.area.start_date.isoformat() if config.area.start_date else ""},
         {"key": "end_date", "value": config.area.end_date.isoformat() if config.area.end_date else ""},
         {"key": "wave_buffer_km", "value": config.area.wave_buffer_km},

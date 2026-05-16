@@ -55,6 +55,7 @@ DEFAULT_PERIOD_BATCH_SIZE_BY_GROUP = {
 }
 FEATURE_COLLECTION_RESULT_LIMIT = 5_000
 FEATURE_COLLECTION_RESULT_SAFETY_LIMIT = 4_500
+DETAIL_BOUNDARY_REGION_THRESHOLD = 75
 TILE_SCALE_BY_GROUP = {
     "climate": 4,
     "rainfall": 4,
@@ -1337,6 +1338,67 @@ def adaptive_period_batch_size(group_name: str, region_count: int) -> int:
     return max(1, min(default_batch_size, feature_limited_batch_size))
 
 
+def resolve_aggregation_strategy(
+    frequency: str,
+    requested_strategy: str,
+    boundary_mode: str,
+    admin_level: int,
+    region_count: int,
+) -> str:
+    strategy = (requested_strategy or "auto").strip().lower()
+    if strategy in {"daily_first", "direct_period"}:
+        return strategy
+    if frequency == "daily":
+        return "direct_period"
+    if boundary_mode in {"custom_geojson", "custom_asset"}:
+        return "direct_period"
+    if admin_level >= 3:
+        return "direct_period"
+    if region_count >= DETAIL_BOUNDARY_REGION_THRESHOLD:
+        return "direct_period"
+    return "daily_first"
+
+
+def empty_group_output_frame(group_name: str) -> pd.DataFrame:
+    columns = ["region_id", "period_start", "period_end", "period_label"] + GROUP_OUTPUT_COLUMNS[group_name]
+    return pd.DataFrame(columns=columns)
+
+
+def build_direct_period_summary_frame(
+    target_frame: pd.DataFrame,
+    group_name: str,
+    frequency: str,
+) -> pd.DataFrame:
+    if target_frame.empty:
+        return empty_group_output_frame(group_name)
+
+    result = target_frame.copy()
+    for metric_name in GROUP_BANDS[group_name]:
+        if metric_name not in result.columns:
+            result[metric_name] = pd.NA
+        if PRIMARY_AGGREGATION_BY_METRIC.get(metric_name) == "sum":
+            mean_column = f"{metric_name}_daily_mean"
+            if frequency == "daily":
+                result[mean_column] = result[metric_name]
+            else:
+                result[mean_column] = pd.NA
+
+        min_column = f"{metric_name}_daily_min"
+        max_column = f"{metric_name}_daily_max"
+        valid_column = f"{metric_name}_valid_days"
+        if frequency == "daily":
+            result[min_column] = result[metric_name]
+            result[max_column] = result[metric_name]
+            result[valid_column] = result[metric_name].notna().astype("Int64")
+        else:
+            result[min_column] = pd.NA
+            result[max_column] = pd.NA
+            result[valid_column] = pd.Series([pd.NA] * len(result), dtype="Int64")
+
+    keep_columns = ["region_id", "period_start", "period_end", "period_label"] + GROUP_OUTPUT_COLUMNS[group_name]
+    return result.reindex(columns=keep_columns).drop_duplicates().reset_index(drop=True)
+
+
 def fetch_group_chunk_frame(
     period_chunk: List[Period],
     regions_fc: ee.FeatureCollection,
@@ -1486,7 +1548,29 @@ def merge_group_frame_into_base(
     image_builder,
     group_start: date,
     group_name: str,
+    aggregation_strategy: str,
+    frequency: str,
 ) -> pd.DataFrame:
+    if aggregation_strategy == "direct_period":
+        target_frame = reduce_group_over_periods(
+            periods=target_periods,
+            regions_fc=regions_fc,
+            scale=scale,
+            image_builder=image_builder,
+            group_start=group_start,
+            group_name=group_name,
+        )
+        summarized_frame = build_direct_period_summary_frame(
+            target_frame=target_frame,
+            group_name=group_name,
+            frequency=frequency,
+        )
+        return base_frame.merge(
+            summarized_frame,
+            how="left",
+            on=["region_id", "period_start", "period_end", "period_label"],
+        )
+
     daily_frame = reduce_group_over_periods(
         periods=daily_periods,
         regions_fc=regions_fc,
@@ -1516,9 +1600,23 @@ def collect_support_dataframe(
 ) -> pd.DataFrame:
     groups = set(selected_groups or {"climate", "wave", "rainfall", "ndvi", "evi", "pollution"})
     region_records = fetch_region_records(regions_fc)
+    region_count = len(region_records)
     wave_regions_fc = build_wave_regions(regions_fc, args.wave_buffer_km)
     frame = build_base_support_dataframe(periods, region_records, args.frequency)
     daily_periods = build_daily_periods_from_target_periods(periods)
+    aggregation_strategy = resolve_aggregation_strategy(
+        frequency=args.frequency,
+        requested_strategy=getattr(args, "aggregation_strategy", "auto"),
+        boundary_mode=getattr(args, "boundary_mode", "gaul"),
+        admin_level=int(getattr(args, "admin_level", 0)),
+        region_count=region_count,
+    )
+    print(
+        f"Menggunakan strategi agregasi {aggregation_strategy} "
+        f"(frequency={args.frequency}, boundary_mode={getattr(args, 'boundary_mode', 'gaul')}, "
+        f"admin_level={getattr(args, 'admin_level', 0)}, region_count={region_count})",
+        flush=True,
+    )
 
     if "climate" in groups:
         frame = merge_group_frame_into_base(
@@ -1530,6 +1628,8 @@ def collect_support_dataframe(
             image_builder=build_climate_image_between,
             group_start=ERA5_START,
             group_name="climate",
+            aggregation_strategy=aggregation_strategy,
+            frequency=args.frequency,
         )
 
     if "wave" in groups:
@@ -1542,6 +1642,8 @@ def collect_support_dataframe(
             image_builder=build_wave_image_between,
             group_start=ERA5_START,
             group_name="wave",
+            aggregation_strategy=aggregation_strategy,
+            frequency=args.frequency,
         )
 
     if "rainfall" in groups:
@@ -1554,6 +1656,8 @@ def collect_support_dataframe(
             image_builder=build_rainfall_image_between,
             group_start=CHIRPS_START,
             group_name="rainfall",
+            aggregation_strategy=aggregation_strategy,
+            frequency=args.frequency,
         )
 
     if "ndvi" in groups:
@@ -1566,6 +1670,8 @@ def collect_support_dataframe(
             image_builder=build_ndvi_image_between,
             group_start=MODIS_START,
             group_name="ndvi",
+            aggregation_strategy=aggregation_strategy,
+            frequency=args.frequency,
         )
 
     if "evi" in groups:
@@ -1578,6 +1684,8 @@ def collect_support_dataframe(
             image_builder=build_evi_image_between,
             group_start=MODIS_START,
             group_name="evi",
+            aggregation_strategy=aggregation_strategy,
+            frequency=args.frequency,
         )
 
     if "pollution" in groups:
@@ -1590,6 +1698,8 @@ def collect_support_dataframe(
             image_builder=build_pollution_image_between,
             group_start=S5P_START,
             group_name="pollution",
+            aggregation_strategy=aggregation_strategy,
+            frequency=args.frequency,
         )
 
     return frame.sort_values(["region_name", "period_start"]).reset_index(drop=True)

@@ -755,8 +755,21 @@ def main() -> None:
     with col2:
         frequency = st.selectbox("Frekuensi waktu", options=["daily", "weekly", "monthly"], index=2)
         st.caption(
-            "Mode weekly/monthly dibangun dari data harian lebih dulu. "
-            "Default pengamatan dibuka mulai tahun 2000 agar cocok untuk NDVI/EVI."
+            "Default pengamatan dibuka mulai tahun 2000 agar cocok untuk NDVI/EVI. "
+            "Untuk boundary detail, weekly/monthly bisa dihitung dengan strategi direct-period agar lebih ringan."
+        )
+        aggregation_strategy = st.selectbox(
+            "Strategi komputasi",
+            options=["auto", "direct_period", "daily_first"],
+            format_func=lambda mode: {
+                "auto": "Otomatis (Direkomendasikan)",
+                "direct_period": "Direct-period (lebih ringan untuk boundary detail)",
+                "daily_first": "Daily-first (lebih detail, lebih berat)",
+            }[mode],
+        )
+        st.caption(
+            "Untuk boundary detail seperti kelurahan/desa, mode otomatis akan memilih direct-period "
+            "agar komputasi lebih ringan, terutama untuk weekly/monthly."
         )
         start_date = st.date_input(
             "Tanggal mulai",
@@ -783,6 +796,19 @@ def main() -> None:
     custom_region_id_field = (custom_region_id_field or "").strip() or None
     custom_filter_field = (custom_filter_field or "").strip() or None
     custom_filter_value = (custom_filter_value or "").strip() or None
+
+    date_span_days = (end_date - start_date).days + 1
+    is_detail_boundary = boundary_mode in {"custom_geojson", "custom_asset"} or admin_level >= 3
+    if is_detail_boundary and frequency == "daily" and date_span_days > 366:
+        st.warning(
+            "Output harian untuk boundary detail pada rentang lebih dari 1 tahun akan sangat berat. "
+            "Pertimbangkan monthly/weekly atau pecah rentang waktu menjadi beberapa job."
+        )
+    if is_detail_boundary and frequency in {"weekly", "monthly"} and aggregation_strategy == "daily_first":
+        st.warning(
+            "Mode daily-first untuk boundary detail bisa sangat lama. "
+            "Pakai `Otomatis` atau `Direct-period` jika ingin komputasi lebih ringan."
+        )
 
     def validate_spatial_inputs() -> None:
         if boundary_mode == "gaul":
@@ -852,6 +878,7 @@ def main() -> None:
             custom_filter_field=custom_filter_field,
             custom_filter_value=custom_filter_value,
             frequency=frequency,
+            aggregation_strategy=aggregation_strategy,
             start_date=start_date,
             end_date=end_date,
             wave_buffer_km=wave_buffer_km,
