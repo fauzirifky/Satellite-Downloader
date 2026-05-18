@@ -15,7 +15,12 @@ import pandas as pd
 import streamlit as st
 
 try:
-    from .export_satellite_support import fetch_region_centroids, initialize_earth_engine, list_regions
+    from .export_satellite_support import (
+        fetch_region_centroids,
+        initialize_earth_engine,
+        list_regions,
+        resolve_aggregation_strategy,
+    )
     from .satellite_general_workbook import (
         GROUP_ORDER,
         GROUP_SPECS,
@@ -28,7 +33,12 @@ try:
         selected_groups_from_variables,
     )
 except ImportError:
-    from export_satellite_support import fetch_region_centroids, initialize_earth_engine, list_regions
+    from export_satellite_support import (
+        fetch_region_centroids,
+        initialize_earth_engine,
+        list_regions,
+        resolve_aggregation_strategy,
+    )
     from satellite_general_workbook import (
         GROUP_ORDER,
         GROUP_SPECS,
@@ -50,6 +60,8 @@ JOB_ROOT = APP_DIR / "satellite_jobs"
 MIN_OBSERVATION_DATE = date(2000, 1, 1)
 MAX_OBSERVATION_DATE = date(2035, 12, 31)
 DEFAULT_VARIABLES = ["temp_mean", "humidity", "solar_radiation", "rainfall", "ndvi"]
+DETAIL_DAILY_WARNING_REGION_THRESHOLD = 50
+DETAIL_DAILY_WARNING_DAY_THRESHOLD = 366
 GROUP_LABELS = {
     "climate": "Iklim",
     "rainfall": "Curah Hujan",
@@ -162,6 +174,43 @@ def geojson_property_values(
         if value:
             values.add(value)
     return sorted(values)
+
+
+def count_matching_geojson_features(
+    boundary_path: Optional[str],
+    filter_field: Optional[str] = None,
+    filter_value: Optional[str] = None,
+) -> Optional[int]:
+    if not boundary_path:
+        return None
+    path = Path(boundary_path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    count = 0
+    for feature in payload.get("features", []):
+        properties = feature.get("properties") or {}
+        if filter_field and filter_value is not None:
+            if str(properties.get(filter_field, "")).strip() != str(filter_value).strip():
+                continue
+        count += 1
+    return count
+
+
+def estimate_target_period_count(start_date: date, end_date: date, frequency: str) -> int:
+    if end_date < start_date:
+        return 0
+    if frequency == "daily":
+        return (end_date - start_date).days + 1
+    if frequency == "weekly":
+        return ((end_date - start_date).days // 7) + 1
+    if frequency == "monthly":
+        return ((end_date.year - start_date.year) * 12) + (end_date.month - start_date.month) + 1
+    return (end_date - start_date).days + 1
 
 
 def now_iso() -> str:
@@ -485,9 +534,10 @@ def render_region_helper(
 def render_variable_selector() -> List[str]:
     st.subheader("3. Variabel Satelit")
     st.caption(
-        "Centang variabel yang ingin Anda unduh. Untuk output mingguan/bulanan, app akan "
-        "menghitung data harian dulu lalu merangkum hasilnya. Sheet grup akan menyertakan "
-        "kolom utama, ringkasan min/max harian, dan jumlah hari valid."
+        "Centang variabel yang ingin Anda unduh. Untuk boundary umum, output mingguan/bulanan "
+        "bisa dibangun dari data harian lebih dulu. Untuk boundary detail seperti kelurahan, "
+        "app bisa memakai strategi direct-period agar lebih ringan. Sheet grup akan menyertakan "
+        "kolom utama, dan bila tersedia juga ringkasan min/max serta jumlah hari valid."
     )
     selected_variables: List[str] = []
     default_set = set(st.session_state.get("selected_variables_general", DEFAULT_VARIABLES))
@@ -799,7 +849,7 @@ def main() -> None:
 
     date_span_days = (end_date - start_date).days + 1
     is_detail_boundary = boundary_mode in {"custom_geojson", "custom_asset"} or admin_level >= 3
-    if is_detail_boundary and frequency == "daily" and date_span_days > 366:
+    if is_detail_boundary and frequency == "daily" and date_span_days > DETAIL_DAILY_WARNING_DAY_THRESHOLD:
         st.warning(
             "Output harian untuk boundary detail pada rentang lebih dari 1 tahun akan sangat berat. "
             "Pertimbangkan monthly/weekly atau pecah rentang waktu menjadi beberapa job."
@@ -863,6 +913,60 @@ def main() -> None:
     selected_groups = selected_groups_from_variables(selected_variables)
     st.caption(f"Kelompok data yang akan dipakai: {', '.join(selected_groups) if selected_groups else '-'}")
 
+    estimated_region_count: Optional[int] = None
+    if boundary_mode == "custom_geojson":
+        if scope_mode == "custom_all":
+            estimated_region_count = count_matching_geojson_features(
+                custom_geojson_path,
+                filter_field=custom_filter_field,
+                filter_value=custom_filter_value,
+            )
+        elif scope_mode in {"custom_single", "custom_union"}:
+            estimated_region_count = 1
+    elif boundary_mode == "custom_asset" and scope_mode in {"custom_single", "custom_union"}:
+        estimated_region_count = 1
+    elif boundary_mode == "gaul" and scope_mode in {"country", "single_region"}:
+        estimated_region_count = 1
+
+    effective_aggregation_strategy = resolve_aggregation_strategy(
+        frequency=frequency,
+        requested_strategy=aggregation_strategy,
+        boundary_mode=boundary_mode,
+        admin_level=admin_level,
+        region_count=estimated_region_count or 0,
+    )
+    target_period_count = estimate_target_period_count(start_date, end_date, frequency)
+    source_period_count = (
+        date_span_days if effective_aggregation_strategy == "daily_first" else target_period_count
+    )
+
+    if estimated_region_count is not None and selected_groups:
+        estimated_reductions = estimated_region_count * source_period_count
+        st.info(
+            "Estimasi beban komputasi: "
+            f"{estimated_region_count} wilayah x {source_period_count} periode sumber "
+            f"= sekitar {estimated_reductions:,} reduksi per grup "
+            f"({len(selected_groups)} grup dipilih, strategi efektif: {effective_aggregation_strategy})."
+        )
+
+    requires_heavy_daily_ack = (
+        is_detail_boundary
+        and frequency == "daily"
+        and date_span_days > DETAIL_DAILY_WARNING_DAY_THRESHOLD
+        and (estimated_region_count or 0) >= DETAIL_DAILY_WARNING_REGION_THRESHOLD
+    )
+    heavy_daily_ack = False
+    if requires_heavy_daily_ack:
+        st.error(
+            "Konfigurasi saat ini termasuk job sangat berat: output harian untuk boundary detail "
+            "dengan banyak polygon dan rentang lebih dari 1 tahun. Untuk Bandung kelurahan, "
+            "lebih aman pecah per tahun atau pakai weekly/monthly."
+        )
+        heavy_daily_ack = st.checkbox(
+            "Saya paham risikonya dan tetap ingin menjalankan job harian detail ini.",
+            key="allow_heavy_detail_daily_job",
+        )
+
     config = SatelliteWorkbookConfig(
         area=SatelliteAreaConfig(
             country=country,
@@ -905,11 +1009,19 @@ def main() -> None:
     )
     col_run_1, col_run_2 = st.columns(2)
 
+    def validate_execution_plan() -> None:
+        if requires_heavy_daily_ack and not heavy_daily_ack:
+            raise UserInputError(
+                "Job harian detail ini terlalu berat untuk dijalankan tanpa konfirmasi. "
+                "Centang persetujuan di atas, atau kecilkan rentang waktu menjadi maksimal 1 tahun per job."
+            )
+
     if col_run_1.button("Generate di browser", type="primary", use_container_width=True):
         try:
             if not selected_variables:
                 raise UserInputError("Pilih minimal satu variabel satelit.")
             validate_spatial_inputs()
+            validate_execution_plan()
 
             project = resolve_effective_project(st.session_state.get("gee_project", ""))
             if not project:
@@ -956,6 +1068,7 @@ def main() -> None:
             if not selected_variables:
                 raise UserInputError("Pilih minimal satu variabel satelit.")
             validate_spatial_inputs()
+            validate_execution_plan()
             project = resolve_effective_project(st.session_state.get("gee_project", ""))
             if not project:
                 raise UserInputError("GEE Project ID masih kosong.")
